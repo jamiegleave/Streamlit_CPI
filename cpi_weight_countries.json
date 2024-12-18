@@ -1,0 +1,158 @@
+[
+ {
+   "Code": "BE",
+   "Country": "Belgium"
+ },
+ {
+   "Code": "BG",
+   "Country": "Bulgaria"
+ },
+ {
+   "Code": "CZ",
+   "Country": "Czechia"
+ },
+ {
+   "Code": "DK",
+   "Country": "Denmark"
+ },
+ {
+   "Code": "DE",
+   "Country": "Germany"
+ },
+ {
+   "Code": "EE",
+   "Country": "Estonia"
+ },
+ {
+   "Code": "IE",
+   "Country": "Ireland"
+ },
+ {
+   "Code": "EL",
+   "Country": "Greece"
+ },
+ {
+   "Code": "ES",
+   "Country": "Spain"
+ },
+ {
+   "Code": "FR",
+   "Country": "France"
+ },
+ {
+   "Code": "HR",
+   "Country": "Croatia"
+ },
+ {
+   "Code": "IT",
+   "Country": "Italy"
+ },
+ {
+   "Code": "CY",
+   "Country": "Cyprus"
+ },
+ {
+   "Code": "LV",
+   "Country": "Latvia"
+ },
+ {
+   "Code": "LT",
+   "Country": "Lithuania"
+ },
+ {
+   "Code": "LU",
+   "Country": "Luxembourg"
+ },
+ {
+   "Code": "HU",
+   "Country": "Hungary"
+ },
+ {
+   "Code": "MT",
+   "Country": "Malta"
+ },
+ {
+   "Code": "NL",
+   "Country": "Netherlands"
+ },
+ {
+   "Code": "AT",
+   "Country": "Austria"
+ },
+ {
+   "Code": "PL",
+   "Country": "Poland"
+ },
+ {
+   "Code": "PT",
+   "Country": "Portugal"
+ },
+ {
+   "Code": "RO",
+   "Country": "Romania"
+ },
+ {
+   "Code": "SI",
+   "Country": "Slovenia"
+ },
+ {
+   "Code": "SK",
+   "Country": "Slovakia"
+ },
+ {
+   "Code": "FI",
+   "Country": "Finland"
+ },
+ {
+   "Code": "SE",
+   "Country": "Sweden"
+ },
+ {
+   "Code": "EEA",
+   "Country": "European Economic Area (EEA18-1995, EEA28-2004, EEA30-2007, EEA31-2013, EEA30-2020)"
+ },
+ {
+   "Code": "IS",
+   "Country": "Iceland"
+ },
+ {
+   "Code": "NO",
+   "Country": "Norway"
+ },
+ {
+   "Code": "CH",
+   "Country": "Switzerland"
+ },
+ {
+   "Code": "UK",
+   "Country": "United Kingdom"
+ },
+ {
+   "Code": "ME",
+   "Country": "Montenegro"
+ },
+ {
+   "Code": "MK",
+   "Country": "North Macedonia"
+ },
+ {
+   "Code": "AL",
+   "Country": "Albania"
+ },
+ {
+   "Code": "RS",
+   "Country": "Serbia"
+ },
+ {
+   "Code": "TR",
+   "Country": "Turkey"
+ },
+ {
+   "Code": "XK",
+   "Country": "Kosovo*"
+ },
+ {
+   "Code": "US",
+   "Country": "United States"
+ }
+]
