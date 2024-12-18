@@ -418,12 +418,15 @@ class CPIDataLoader:
         self.cache = TTLCache(maxsize=100, ttl=3600)
     
     @retry_on_failure()
-    def fetch_uk_data(self, start_date: str = '1999-01-01') -> pd.DataFrame:
+    def fetch_uk_data(self, start_date: str) -> pd.DataFrame:
         """Fetch UK CPI data from FRED."""
+        start_date = pd.to_datetime(start_date)
+        index_start_date = pd.to_datetime(f"{start_date.year-1}-{start_date.month}-{start_date.day}")
+
         try:
             uk_cpi = self.fred_client.get_series(
                 'GBRCPIALLMINMEI',
-                observation_start=start_date,
+                observation_start=index_start_date,
                 frequency='m'
             )
             
@@ -486,7 +489,7 @@ class UnifiedCPIManager:
         self.ons_weights = ONSWeightsLoader(cache_dir)
         self.eurostat_weights = EurostatWeightsLoader()
         
-    def get_cpi_data(self, countries: List[str], start_date: str = '1999-01-01') -> pd.DataFrame:
+    def get_cpi_data(self, countries: List[str], start_date: str) -> pd.DataFrame:
         """Fetch CPI data for specified countries."""
         uk_requested = 'UK' in countries
         eurostat_countries = [c for c in countries if c != 'UK']
@@ -532,7 +535,7 @@ class UnifiedCPIManager:
         except Exception as e:
             raise DataAcquisitionError(f"Failed to get weights data: {str(e)}")
     
-    def get_complete_cpi_data(self, countries: List[str], start_date: str = '1999-01-01') -> Dict[str, pd.DataFrame]:
+    def get_complete_cpi_data(self, countries: List[str], start_date: str) -> Dict[str, pd.DataFrame]:
         """
         Fetch both CPI values and weights data for specified countries.
         

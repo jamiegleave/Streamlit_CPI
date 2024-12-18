@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
 import json
+import plotly.express as px
+import plotly.graph_objects as go
 from unified_cpi_system import UnifiedCPIManager
 
 # Configure the page
@@ -50,19 +52,12 @@ if country_mappings:
         help="Select countries to include in the analysis"
     )
     
-    # Date range selector
-    start_date = st.date_input(
-        "Select Start Date",
-        value=pd.to_datetime("2020-01-01"),
-        help="Select the start date for CPI data"
-    )
-    
     # Submit button
     if st.button("Load Data", disabled=len(selected_countries) == 0):
         selected_codes = [country_dict[country] for country in selected_countries]
         
         with st.spinner(f'Loading data for {", ".join(selected_countries)}...'):
-            data = load_data(selected_codes, start_date.strftime("%Y-%m-%d"))
+            data = load_data(selected_codes, pd.to_datetime("2000-01-01").strftime("%Y-%m-%d"))
             if data is not None:
                 st.session_state.data = data
                 st.session_state.data_loaded = True
@@ -77,7 +72,7 @@ if country_mappings:
         tab1, tab2 = st.tabs(["CPI Data", "Weights Data"])
         
         with tab1:
-            st.header("CPI Analysis")
+            st.header("CPI, 12-mo percentage change")
             
             # CPI data filters
             st.sidebar.header("CPI Data Filters")
@@ -95,28 +90,28 @@ if country_mappings:
                    (cpi_df['date'] <= pd.Timestamp(date_range[1]))
             filtered_cpi = cpi_df[mask]
             
-            # Display CPI statistics
-            st.subheader("CPI Summary Statistics")
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.metric(
-                    "Average Inflation Rate",
-                    f"{filtered_cpi['value'].mean():.1f}%"
-                )
-            
-            with col2:
-                st.metric(
-                    "Maximum Inflation Rate",
-                    f"{filtered_cpi['value'].max():.1f}%"
-                )
-            
-            with col3:
-                st.metric(
-                    "Minimum Inflation Rate",
-                    f"{filtered_cpi['value'].min():.1f}%"
-                )
-            
+            # Display CPI data by country
+            st.subheader("By Country")
+
+            df1 = filtered_cpi.groupby('country')['value'].agg(['min','mean','max'])
+            fig = px.line(
+                filtered_cpi,
+                x=filtered_cpi['date'],
+                y=filtered_cpi['value'],  # Switch to y-axis for horizontal bars
+                labels={'value': 'CPI', 'country': 'Country'},
+                color='country',
+                markers=True
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Display CPI data
+            st.subheader("Average CPI Data by Country")
+            st.dataframe(
+                filtered_cpi.groupby('country')['value'].agg(['min','mean','max']),
+                use_container_width=True
+            )
+
             # Display CPI data
             st.subheader("Detailed CPI Data")
             st.dataframe(
