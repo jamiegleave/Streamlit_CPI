@@ -410,7 +410,7 @@ class EurostatWeightsLoader:
                     self.logger.warning(f"Weights for {country} in {year} sum to {total:.1f}, expected ~1000")
 
 class CPIDataLoader:
-    """Handler for fetching CPI values from FRED and Eurostat."""
+    """Handler for fetching CPI index values from FRED and Eurostat."""
     
     def __init__(self, fred_api_key: str):
         self.fred_api_key = fred_api_key
@@ -419,14 +419,11 @@ class CPIDataLoader:
     
     @retry_on_failure()
     def fetch_uk_data(self, start_date: str) -> pd.DataFrame:
-        """Fetch UK CPI data from FRED."""
-        start_date = pd.to_datetime(start_date)
-        index_start_date = pd.to_datetime(f"{start_date.year-1}-{start_date.month}-{start_date.day}")
-
+        """Fetch UK CPI index data from FRED."""
         try:
             uk_cpi = self.fred_client.get_series(
                 'GBRCPIALLMINMEI',
-                observation_start=index_start_date,
+                observation_start=start_date,
                 frequency='m'
             )
             
@@ -436,20 +433,18 @@ class CPIDataLoader:
             df['country'] = 'UK'
             df['source'] = 'FRED'
             
-            # Calculate YoY change
-            df['value'] = df['value'].pct_change(periods=12) * 100
-            return df.dropna()
+            return df
             
         except Exception as e:
             raise NetworkError(f"Failed to fetch UK CPI data: {str(e)}")
 
     @retry_on_failure()
     def fetch_eurostat_data(self, countries: List[str]) -> pd.DataFrame:
-        """Fetch HICP data from Eurostat."""
-        base_url = "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/prc_hicp_mv12r"
+        """Fetch HICP index data from Eurostat."""
+        base_url = "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/prc_hicp_midx"
         params = {
             "format": "JSON",
-            "unit": "RCH_MV12MAVR",
+            "unit": "I15",  # Index, annual average = 100
             "coicop": "CP00",
             "lang": "en"
         }
@@ -478,6 +473,65 @@ class CPIDataLoader:
                 continue
         
         return pd.DataFrame(all_data) if all_data else pd.DataFrame()
+    
+    def calculate_cpi_ratio(self, df_cpi: pd.DataFrame, time_periods: Dict[str, List[int]]) -> pd.DataFrame:
+        """
+        Calculate CPI ratios for specified time periods.
+        
+        Args:
+            data (pd.DataFrame): DataFrame containing CPI data with columns:
+                - date: DateTime of the observation
+                - value: CPI value
+                - country: Country code
+            time_periods (Dict[str, List[int]]): Dictionary mapping period names to [start_year, end_year]
+                Example: {'Pre-GFC': [2000, 2009], 'Post-GFC': [2010, 2019]}
+        
+        Returns:
+            pd.DataFrame: DataFrame with countries as index and time periods as columns,
+                            containing CPI ratios for each period
+        """
+        
+        if df_cpi.empty:
+            raise ValueError("Input DataFrame is empty")
+            
+        required_columns = {'date', 'value', 'country'}
+        if not all(col in df_cpi.columns for col in required_columns):
+            raise ValueError(f"Data must contain columns: {required_columns}")
+        
+        try:
+            result_df = pd.DataFrame(index=df_cpi['country'].unique())
+            
+            for period_name, [start_year, end_year] in time_periods.items():
+                rocs = []
+                
+                for country in result_df.index:
+                    # Filter data for the specific country and time period
+                    mask = (
+                        (df_cpi['country'] == country) & 
+                        (df_cpi['date'].dt.year >= start_year) & 
+                        (df_cpi['date'].dt.year <= end_year) &
+                        (df_cpi['date'].dt.month == 1)
+                    )
+                    period_data = df_cpi[mask]['value']
+                    
+                    if len(period_data) < 2:
+                        logger.warning(
+                            f"Insufficient data for {country} in period {period_name}. "
+                            f"Setting ratio to NaN."
+                        )
+                        rocs.append(float('nan'))
+                    else:
+                        # Calculate ratio of final value to initial value
+                        rate_of_change = (period_data.iloc[-1] - period_data.iloc[0])/period_data.iloc[0]
+                        t_elapsed = end_year - start_year
+                        rocs.append(rate_of_change/t_elapsed)
+                
+                result_df[period_name] = rocs
+            
+            return result_df
+        
+        except Exception as e:
+            raise DataValidationError(f"Failed to calculate CPI ratios: {str(e)}")
 
 class UnifiedCPIManager:
     """
@@ -534,8 +588,11 @@ class UnifiedCPIManager:
             
         except Exception as e:
             raise DataAcquisitionError(f"Failed to get weights data: {str(e)}")
+        
+    def get_ratio_data(self, df_cpi: pd.DataFrame, time_periods: Dict[str, List[int]]) -> pd.DataFrame:
+        return self.cpi_loader.calculate_cpi_ratio(df_cpi, time_periods)
     
-    def get_complete_cpi_data(self, countries: List[str], start_date: str) -> Dict[str, pd.DataFrame]:
+    def get_complete_cpi_data(self, countries: List[str], start_date: str, ratio_periods: Dict[str, List[int]]) -> Dict[str, pd.DataFrame]:
         """
         Fetch both CPI values and weights data for specified countries.
         
@@ -544,7 +601,11 @@ class UnifiedCPIManager:
             - 'cpi': Time series of CPI values
             - 'weights': Current weights data
         """
+        cpi = self.get_cpi_data(countries, start_date)
+
         return {
-            'cpi': self.get_cpi_data(countries, start_date),
+            'cpi': cpi,
+            'roc': self.get_ratio_data(cpi, ratio_periods),
             'weights': self.get_weights_data(countries)
         }
+    

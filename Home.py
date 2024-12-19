@@ -1,4 +1,5 @@
 import streamlit as st
+import numpy as np
 import pandas as pd
 import json
 import plotly.express as px
@@ -12,7 +13,7 @@ st.set_page_config(
 )
 
 # Add title
-st.title("Consumer Price Index - Headline & Weights")
+st.title("Consumer Price Index")
 
 # Initialize session state for storing the data
 if 'data_loaded' not in st.session_state:
@@ -30,16 +31,21 @@ def load_country_mappings():
 
 # Load data for selected countries
 @st.cache_data(ttl=3600)  # Cache for 1 hour
-def load_data(country_codes, start_date):
+def load_data(country_codes, start_date, ratio_periods):
     try:
         manager = UnifiedCPIManager(fred_api_key="899901ba06f09b9961a73113b1834a15")
-        return manager.get_complete_cpi_data(countries=country_codes, start_date=start_date)
+        return manager.get_complete_cpi_data(countries=country_codes, start_date=start_date, ratio_periods=periods)
     except Exception as e:
         st.error(f"Error loading data: {str(e)}")
         return None
 
 # Load country mappings
 country_mappings = load_country_mappings()
+periods = {
+    'Pre-GFC, until 2009 (2000=100)': [2000, 2009],
+    'Post-GFC, until 2019 (2010=100)': [2010, 2019],
+    'Post-COVID, until 2023 (2020=100)': [2020, 2023]
+}
 
 if country_mappings:
     # Create a dictionary of Country: Code for the dropdown
@@ -57,7 +63,7 @@ if country_mappings:
         selected_codes = [country_dict[country] for country in selected_countries]
         
         with st.spinner(f'Loading data for {", ".join(selected_countries)}...'):
-            data = load_data(selected_codes, pd.to_datetime("2000-01-01").strftime("%Y-%m-%d"))
+            data = load_data(selected_codes, pd.to_datetime("2000-01-01").strftime("%Y-%m-%d"),periods)
             if data is not None:
                 st.session_state.data = data
                 st.session_state.data_loaded = True
@@ -72,7 +78,7 @@ if country_mappings:
         tab1, tab2 = st.tabs(["CPI Data", "Weights Data"])
         
         with tab1:
-            st.header("CPI, 12-mo percentage change")
+            st.header("Consumer Price Index (2015=100)")
             
             # CPI data filters
             st.sidebar.header("CPI Data Filters")
@@ -91,33 +97,73 @@ if country_mappings:
             filtered_cpi = cpi_df[mask]
             
             # Display CPI data by country
-            st.subheader("By Country")
+            st.subheader("Time Series")
 
-            df1 = filtered_cpi.groupby('country')['value'].agg(['min','mean','max'])
+            # Create line plot for index values
             fig = px.line(
                 filtered_cpi,
-                x=filtered_cpi['date'],
-                y=filtered_cpi['value'],  # Switch to y-axis for horizontal bars
-                labels={'value': 'CPI', 'country': 'Country'},
+                x='date',
+                y='value',
                 color='country',
+                labels={'value': 'CPI Index (2015=100)', 'date': 'Date', 'country': 'Country'},
                 markers=True
+            )
+            
+            # Update y-axis to start from 0
+            fig.update_layout(yaxis_range=[50, max(filtered_cpi['value']) * 1.1])
+            
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Display summary statistics
+            st.subheader("Annualised Rate of Change")
+
+            periods = {
+                'Pre-GFC': [2000, 2009],
+                'Post-GFC': [2010, 2019],
+                'Post-COVID': [2020, 2024]
+                }
+            
+            df = data['roc']
+
+            if isinstance(df, pd.io.formats.style.Styler):
+                df = df.data
+
+            # Create a single heatmap
+            fig = go.Figure(data=go.Heatmap(
+                z=df.values * 100,
+                x=df.columns,
+                y=df.index,
+                text=[[f'{val*100:.2f}%' for val in row] for row in df.values],
+                texttemplate='%{text}',
+                textfont={"size": 14},
+                colorscale='YlOrRd',  # Using a simple blue scale
+                colorbar=dict(
+                    title='Rate of Change (%)',
+                    titleside='right',
+                    tickformat='.1f'
+                )
+            ))
+
+            fig.update_layout(
+                title='Annualised Rate of Change',
+                xaxis_title='Period',
+                yaxis_title='Country',
+                width=800,
+                height=400,
+                yaxis={'autorange': 'reversed'},  # Keep countries in original order
+                font=dict(size=12)
             )
 
             st.plotly_chart(fig, use_container_width=True)
 
-            # Display CPI data
-            st.subheader("Average CPI Data by Country")
-            st.dataframe(
-                filtered_cpi.groupby('country')['value'].agg(['min','mean','max']),
-                use_container_width=True
-            )
+            #st.dataframe(df_roc, use_container_width=True)
 
-            # Display CPI data
+            # Display detailed CPI data
             st.subheader("Detailed CPI Data")
             st.dataframe(
                 filtered_cpi.sort_values(['country', 'date'])
                 .style.format({
-                    'value': '{:.1f}%',
+                    'value': '{:.1f}',
                     'date': lambda x: x.strftime('%Y-%m-%d')
                 }),
                 use_container_width=True
