@@ -15,8 +15,6 @@ from typing import Dict, Optional, Union, List
 from requests.exceptions import RequestException
 from cachetools import TTLCache
 from fredapi import Fred
-import re
-from io import StringIO
 
 # Configure logging
 logging.basicConfig(
@@ -79,81 +77,61 @@ class ONSWeightsLoader:
             raise NetworkError(f"Failed to download ONS data: {str(e)}")
     
     def parse_excel(self, file_path: Path) -> pd.DataFrame:
-        """Parse ONS Excel file into DataFrame."""
-        try:
-            # First read the year row (Row 3)
-            year_row = pd.read_excel(
-                file_path,
-                sheet_name='W3-CPIH',
-                skiprows=2,
-                nrows=1,
-                usecols='B:AB'
-            )
+        """
+        Parse ONS Excel file into DataFrame.
+        Specifically handles the W1-CPI sheet, excluding the 'overall index' row
+        and processing only the individual category weights.
+        
+        Args:
+            file_path: Path to Excel file
             
-            # Then read the data
+        Returns:
+            DataFrame with CPI weights data
+            
+        Raises:
+            DataValidationError: If data format is invalid or unexpected
+        """
+        try:
+            # First, read the entire relevant section to validate structure
             raw_df = pd.read_excel(
                 file_path,
-                sheet_name='W3-CPIH',
-                skiprows=4,
-                nrows=13,
+                sheet_name='W1-CPI',
+                skiprows=4,  # Skip header rows
+                nrows=13,    # Read overall index + 12 categories
                 usecols='B:AB'
             )
-            
-            # Extract years from year row, handling split years
-            years = []
-            for col in year_row.columns[2:]:  # Skip Code and Description columns
-                year_val = year_row.iloc[0, year_row.columns.get_loc(col)]
-                if pd.notna(year_val):
-                    # Extract year using regex to handle different formats
-                    year_match = re.search(r'(\d{4})', str(year_val))
-                    if year_match:
-                        years.append(year_match.group(1))
-            
-            logger.info(f"Processing ONS weights data for years: {min(years)} to {max(years)}")
-            
-            # Create mapping of original columns to extracted years
-            year_mapping = {
-                col: year for col, year in zip(raw_df.columns[2:], years)
-            }
-            
-            # Rename columns using the mapping
-            new_columns = ['Code', 'Description'] + [year_mapping[col] for col in raw_df.columns[2:]]
-            raw_df.columns = new_columns
+                       
+            # Validate the overall index row
+            raw_df.columns = [str(i)[0:4] for i in raw_df.columns]
+            raw_df.columns = ['Code', 'Description'] + raw_df.columns[2:].tolist()
             raw_df = raw_df.loc[:,~raw_df.columns.duplicated()]
+
+            first_row_code = str(raw_df.iloc[0, 0]).strip()
+
+            if not first_row_code.startswith('CHZQ') or abs(raw_df.iloc[0, raw_df.columns.get_loc('2024')] - 1000) > 0.1:
+                raise DataValidationError("First row is not the expected overall index with value 1000")
             
-            logger.info(f"After cleanup columns: {raw_df.columns.tolist()}")
-            
-            # Get the overall index code from the first row
-            overall_index_code = str(raw_df.iloc[0, 0]).strip()
-            
-            # Create a new DataFrame excluding the overall index row
-            df = raw_df[raw_df.Code != overall_index_code].copy()
+            # Create a new DataFrame instead of modifying a slice
+            df = raw_df[raw_df.Code!='CHZQ'].copy()
             
             # Clean up the description column
             df.loc[:, 'Description'] = df['Description'].str.strip()
             
-            # Get unique years and use the latest value for each year
-            years = sorted(set(str(col) for col in df.columns if str(col).isdigit()))
-            logger.info(f"Year columns found: {years}")
+            # Get year columns (all numeric columns except the first two)
+            year_columns = [col for col in df.columns if str(col).isdigit()]
             
-            # For each year, if there are multiple columns, use the latest value
-            final_data = []
-            for code_idx, code_row in df.iterrows():
-                for year in years:
-                    matching_cols = [col for col in df.columns if str(col) == year]
-                    if matching_cols:
-                        final_data.append({
-                            'Code': code_row['Code'],
-                            'Description': code_row['Description'],
-                            'Year': int(year),
-                            'Weight': float(code_row[matching_cols[-1]])  # Use last column for each year
-                        })
+            # Melt the DataFrame to create the long format
+            years_df = df.melt(
+                id_vars=['Code', 'Description'],
+                value_vars=year_columns,
+                var_name='Year',
+                value_name='Weight'
+            )
             
-            # Create DataFrame from processed data
-            years_df = pd.DataFrame(final_data)
-            
-            # Add source and country
+            # Clean up and type the data
             years_df = years_df.assign(
+                Year=lambda x: x['Year'].astype(int),
+                Weight=lambda x: x['Weight'].astype(float),
                 Source='ONS',
                 Country='UK'
             )
@@ -173,12 +151,24 @@ class ONSWeightsLoader:
             return years_df
             
         except Exception as e:
-            logger.error(f"Excel parsing error. Exception: {str(e)}")
-            logger.error(f"Exception type: {type(e)}")
             raise DataValidationError(f"Failed to parse ONS Excel file: {str(e)}")
     
     def _validate_weights_data(self, df: pd.DataFrame) -> None:
-        """Validate the weights data from ONS."""
+        """
+        Validate the weights data from ONS.
+        
+        Args:
+            df: DataFrame to validate with columns:
+               - Category_Code (e.g., 'CHZR')
+               - Category_Description (e.g., 'Food and non-alcoholic beverages')
+               - Year (e.g., 2024)
+               - Weight (e.g., 112.9084)
+               - Source ('ONS')
+               - Country ('UK')
+            
+        Raises:
+            DataValidationError: If validation fails
+        """
         # Check for required columns
         required_columns = ['Category_Code', 'Category_Description', 'Year', 'Weight', 'Source', 'Country']
         missing_cols = [col for col in required_columns if col not in df.columns]
@@ -190,6 +180,16 @@ class ONSWeightsLoader:
             year_categories = df[df['Year'] == year]['Category_Code'].nunique()
             if year_categories != 12:
                 raise DataValidationError(f"Expected 12 categories for year {year}, found {year_categories}")
+        
+        # Validate specific category codes exist
+        expected_codes = {
+            'CHZR', 'CHZS', 'CHZT', 'CHZU', 'CHZV', 'CHZW',
+            'CHZX', 'CHZY', 'CHZZ', 'CJUU', 'CJUV', 'CJUW'
+        }
+        actual_codes = set(df['Category_Code'].unique())
+        missing_codes = expected_codes - actual_codes
+        if missing_codes:
+            raise DataValidationError(f"Missing expected category codes: {missing_codes}")
         
         # Validate weights sum to approximately 1000 per year
         for year in df['Year'].unique():
@@ -205,7 +205,7 @@ class ONSWeightsLoader:
         
         # Check reasonable upper bound for individual weights
         max_weight = df['Weight'].max()
-        if max_weight > 400:  # Based on the data shown
+        if max_weight > 200:  # Based on historical data, no category typically exceeds 200
             logger.warning(f"Unusually high weight detected: {max_weight}")
         
         # Validate year range
@@ -222,6 +222,13 @@ class ONSWeightsLoader:
         # Check for country consistency
         if not (df['Country'] == 'UK').all():
             raise DataValidationError("Inconsistent country detected")
+        
+        # Modified description format validation
+        invalid_descriptions = df[
+            ~df['Category_Description'].str.match(r'^\s*(?:\d+\s+)?[A-Za-z, ]+')
+        ]['Category_Description'].unique()
+        if len(invalid_descriptions) > 0:
+            logger.warning(f"Potentially invalid descriptions found: {invalid_descriptions}")
         
         # Check for duplicates
         duplicates = df.duplicated(subset=['Category_Code', 'Year'], keep=False)
@@ -241,20 +248,20 @@ class EurostatWeightsLoader:
         
         self.logger = logging.getLogger(__name__)
         
-        # Map COICOP codes to ONS categories
+        # Map COICOP codes to ONS categories with exact description format
         self.category_mapping = {
-            'CP01': ('L5CZ', '01    Food and non-alcoholic beverages'),
-            'CP02': ('L5D2', '02    Alcoholic beverages and tobacco'),
-            'CP03': ('L5D3', '03    Clothing and footwear'),
-            'CP04': ('L5D4', '04    Housing, water, electricity, gas and other fuels'),
-            'CP05': ('L5D5', '05    Furniture, household equipment and maintenance'),
-            'CP06': ('L5D6', '06    Health'),
-            'CP07': ('L5D7', '07    Transport'),
-            'CP08': ('L5D8', '08    Communication'),
-            'CP09': ('L5D9', '09    Recreation and culture'),
-            'CP10': ('L5DA', '10    Education'),
-            'CP11': ('L5DB', '11    Restaurants and hotels'),
-            'CP12': ('L5DC', '12    Miscellaneous goods and services')
+            'CP01': ('CHZR', '01    Food and non-alcoholic beverages'),
+            'CP02': ('CHZS', '02    Alcoholic beverages and tobacco'),
+            'CP03': ('CHZT', '03    Clothing and footwear'),
+            'CP04': ('CHZU', '04    Housing, water, electricity, gas and other fuels'),
+            'CP05': ('CHZV', '05    Furniture, household equipment and maintenance'),
+            'CP06': ('CHZW', '06    Health'),
+            'CP07': ('CHZX', '07    Transport'),
+            'CP08': ('CHZY', '08    Communication'),
+            'CP09': ('CHZZ', '09    Recreation and culture'),
+            'CP10': ('CJUU', '10    Education'),
+            'CP11': ('CJUV', '11    Restaurants and hotels'),
+            'CP12': ('CJUW', '12    Miscellaneous goods and services')
         }
 
     def _fetch_category_timeseries(self, country: str, coicop: str) -> Dict[int, float]:
@@ -402,57 +409,34 @@ class EurostatWeightsLoader:
                 if not (995 <= total <= 1005):
                     self.logger.warning(f"Weights for {country} in {year} sum to {total:.1f}, expected ~1000")
 
-class PriceIndexDataLoader:
-    """Handler for fetching CPI and CPIH index values from ONS and Eurostat."""
+class CPIDataLoader:
+    """Handler for fetching CPI index values from FRED and Eurostat."""
     
     def __init__(self, fred_api_key: str):
         self.fred_api_key = fred_api_key
+        self.fred_client = Fred(api_key=fred_api_key)
         self.cache = TTLCache(maxsize=100, ttl=3600)
     
     @retry_on_failure()
-    def fetch_uk_cpih_data(self, start_date: str) -> pd.DataFrame:
-        """Fetch UK CPIH index data from ONS API."""
+    def fetch_uk_data(self, start_date: str) -> pd.DataFrame:
+        """Fetch UK CPI index data from FRED."""
         try:
-            logger.info("Fetching UK CPIH data from ONS")
-            BASE_URL = "https://api.beta.ons.gov.uk/v1"
-            
-            # Get latest version
-            version_response = requests.get(
-                f"{BASE_URL}/datasets/cpih01/editions/time-series/versions"
+            uk_cpi = self.fred_client.get_series(
+                'GBRCPIALLMINMEI',
+                observation_start=start_date,
+                frequency='m'
             )
-            version_response.raise_for_status()
-            latest_version = version_response.json()['items'][0]['version']
             
-            # Get CPIH data
-            response = requests.get(
-                f"{BASE_URL}/datasets/cpih01/editions/time-series/versions/{latest_version}/observations",
-                params={
-                    "time": "*",
-                    "geography": "K02000001",  # UK
-                    "aggregate": "CP00"  # All items
-                }
-            )
-            response.raise_for_status()
+            df = pd.DataFrame(uk_cpi, columns=['value'])
+            df.index.name = 'date'
+            df.reset_index(inplace=True)
+            df['country'] = 'UK'
+            df['source'] = 'FRED'
             
-            # Process data
-            records = []
-            for obs in response.json()['observations']:
-                records.append({
-                    'date': pd.to_datetime(obs['dimensions']['Time']['label'], format='%b-%y'),
-                    'value': float(obs['observation']),
-                    'country': 'UK',
-                    'source': 'ONS'
-                })
-            
-            # Create and filter DataFrame
-            df = pd.DataFrame(records)
-            df = df[df['date'] >= pd.to_datetime(start_date)]
-            logger.info(f"Successfully fetched UK CPIH data from {df['date'].min():%Y-%m} to {df['date'].max():%Y-%m}")
-            return df.sort_values('date').reset_index(drop=True)
+            return df
             
         except Exception as e:
-            logger.error(f"Failed to fetch UK CPIH data: {str(e)}")
-            raise NetworkError(f"Failed to fetch UK CPIH data: {str(e)}")
+            raise NetworkError(f"Failed to fetch UK CPI data: {str(e)}")
 
     @retry_on_failure()
     def fetch_eurostat_data(self, countries: List[str]) -> pd.DataFrame:
@@ -489,41 +473,13 @@ class PriceIndexDataLoader:
                 continue
         
         return pd.DataFrame(all_data) if all_data else pd.DataFrame()
-
-    def get_cpi_data(self, countries: List[str], start_date: str) -> pd.DataFrame:
-        """Fetch CPI/CPIH data for specified countries."""
-        uk_data = 'UK' in countries
-        eurostat_countries = [c for c in countries if c != 'UK']
-        dfs = []
-        
-        # Handle UK CPIH data
-        if uk_data:
-            try:
-                uk_cpih_df = self.fetch_uk_cpih_data(start_date)
-                if not uk_cpih_df.empty:
-                    dfs.append(uk_cpih_df)
-            except Exception as e:
-                logger.warning(f"Failed to fetch UK CPIH data: {str(e)}")
-        
-        # Handle Eurostat data
-        if eurostat_countries:
-            try:
-                eurostat_df = self.fetch_eurostat_data(eurostat_countries)
-                if not eurostat_df.empty:
-                    dfs.append(eurostat_df)
-            except Exception as e:
-                logger.warning(f"Failed to fetch Eurostat data: {str(e)}")
-        
-        if dfs:
-            return pd.concat(dfs, ignore_index=True).sort_values(['country', 'source', 'date'])
-        return pd.DataFrame()
-
-    def calculate_cpi_rate_of_change(self, df_cpi: pd.DataFrame, time_periods: Dict[str, List[int]]) -> pd.DataFrame:
+    
+    def calculate_cpi_ratio(self, df_cpi: pd.DataFrame, time_periods: Dict[str, List[int]]) -> pd.DataFrame:
         """
-        Calculate CPI rates of change for specified time periods.
+        Calculate CPI ratios for specified time periods.
         
         Args:
-            df_cpi (pd.DataFrame): DataFrame containing CPI data with columns:
+            data (pd.DataFrame): DataFrame containing CPI data with columns:
                 - date: DateTime of the observation
                 - value: CPI value
                 - country: Country code
@@ -532,12 +488,12 @@ class PriceIndexDataLoader:
         
         Returns:
             pd.DataFrame: DataFrame with countries as index and time periods as columns,
-                            containing CPI rates of change for each period
+                            containing CPI ratios for each period
         """
         
         if df_cpi.empty:
             raise ValueError("Input DataFrame is empty")
-        
+            
         required_columns = {'date', 'value', 'country'}
         if not all(col in df_cpi.columns for col in required_columns):
             raise ValueError(f"Data must contain columns: {required_columns}")
@@ -561,11 +517,11 @@ class PriceIndexDataLoader:
                     if len(period_data) < 2:
                         logger.warning(
                             f"Insufficient data for {country} in period {period_name}. "
-                            f"Setting rate of change to NaN."
+                            f"Setting ratio to NaN."
                         )
                         rocs.append(float('nan'))
                     else:
-                        # Calculate rate of change
+                        # Calculate ratio of final value to initial value
                         rate_of_change = (period_data.iloc[-1] - period_data.iloc[0])/period_data.iloc[0]
                         t_elapsed = end_year - start_year
                         rocs.append(rate_of_change/t_elapsed)
@@ -573,18 +529,20 @@ class PriceIndexDataLoader:
                 result_df[period_name] = rocs
             
             return result_df
-            
+        
         except Exception as e:
-            raise DataValidationError(f"Failed to calculate CPI rates of change: {str(e)}")
+            raise DataValidationError(f"Failed to calculate CPI ratios: {str(e)}")
 
 class UnifiedCPIManager:
-    """Unified manager for handling both CPI values and weights data from multiple sources."""
+    """
+    Unified manager for handling both CPI values and weights data from multiple sources.
+    """
     
     def __init__(self, fred_api_key: str, cache_dir: Optional[str] = None):
-        self.price_loader = PriceIndexDataLoader(fred_api_key)
+        self.cpi_loader = CPIDataLoader(fred_api_key)
         self.ons_weights = ONSWeightsLoader(cache_dir)
         self.eurostat_weights = EurostatWeightsLoader()
-    
+        
     def get_cpi_data(self, countries: List[str], start_date: str) -> pd.DataFrame:
         """Fetch CPI data for specified countries."""
         uk_requested = 'UK' in countries
@@ -592,12 +550,12 @@ class UnifiedCPIManager:
         dfs = []
         
         if uk_requested:
-            uk_df = self.price_loader.fetch_uk_cpih_data(start_date)
+            uk_df = self.cpi_loader.fetch_uk_data(start_date)
             if not uk_df.empty:
                 dfs.append(uk_df)
         
         if eurostat_countries:
-            eurostat_df = self.price_loader.fetch_eurostat_data(eurostat_countries)
+            eurostat_df = self.cpi_loader.fetch_eurostat_data(eurostat_countries)
             if not eurostat_df.empty:
                 dfs.append(eurostat_df)
         
@@ -631,25 +589,23 @@ class UnifiedCPIManager:
         except Exception as e:
             raise DataAcquisitionError(f"Failed to get weights data: {str(e)}")
         
-    def get_rate_of_change_data(self, df_cpi: pd.DataFrame, time_periods: Dict[str, List[int]]) -> pd.DataFrame:
-        """Get annualized rate of change data for the specified time periods."""
-        return self.price_loader.calculate_cpi_rate_of_change(df_cpi, time_periods)
+    def get_ratio_data(self, df_cpi: pd.DataFrame, time_periods: Dict[str, List[int]]) -> pd.DataFrame:
+        return self.cpi_loader.calculate_cpi_ratio(df_cpi, time_periods)
     
     def get_complete_cpi_data(self, countries: List[str], start_date: str, ratio_periods: Dict[str, List[int]]) -> Dict[str, pd.DataFrame]:
         """
         Fetch both CPI values and weights data for specified countries.
         
         Returns:
-            Dictionary containing three DataFrames:
+            Dictionary containing two DataFrames:
             - 'cpi': Time series of CPI values
-            - 'roc': Annualized rates of change
             - 'weights': Current weights data
         """
         cpi = self.get_cpi_data(countries, start_date)
 
         return {
             'cpi': cpi,
-            'roc': self.get_rate_of_change_data(cpi, ratio_periods),
+            'roc': self.get_ratio_data(cpi, ratio_periods),
             'weights': self.get_weights_data(countries)
         }
     
